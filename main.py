@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 import json as json_lib
 from contextlib import contextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -60,6 +62,12 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES pw_users (id),
         FOREIGN KEY (watchlist_id) REFERENCES pw_watchlist (id)
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pw_snapshots (
+        watchlist_id INTEGER PRIMARY KEY,
+        snapshot_json TEXT NOT NULL,
+        captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (watchlist_id) REFERENCES pw_watchlist (id)
+    )""")
     conn.commit()
     conn.close()
 
@@ -95,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.6")
+app = FastAPI(title="Player Watch API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.6", "app": "Player Watch"}
+            "version": "0.2.0", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -168,6 +176,8 @@ async def login(user: UserLogin):
 async def delete_account(user_id: int = Depends(get_current_user)):
     with get_db() as conn:
         c = conn.cursor()
+        c.execute("""DELETE FROM pw_snapshots WHERE watchlist_id IN
+                     (SELECT id FROM pw_watchlist WHERE user_id = %s)""", (user_id,))
         c.execute("DELETE FROM pw_notifications WHERE user_id = %s", (user_id,))
         c.execute("DELETE FROM pw_watchlist WHERE user_id = %s", (user_id,))
         c.execute("DELETE FROM pw_users WHERE id = %s", (user_id,))
@@ -206,9 +216,11 @@ async def remove_from_watchlist(item_id: int, user_id: int = Depends(get_current
         c = conn.cursor()
         c.execute("UPDATE pw_watchlist SET status = 'deleted' WHERE id = %s AND user_id = %s",
                   (item_id, user_id))
-        conn.commit()
         if c.rowcount == 0:
+            conn.rollback()
             raise HTTPException(status_code=404, detail="Item not found")
+        c.execute("DELETE FROM pw_snapshots WHERE watchlist_id = %s", (item_id,))
+        conn.commit()
         return {"message": "Removed"}
 
 # ── Notifications ──────────────────────────────────────────────────────────────
@@ -307,12 +319,191 @@ async def espn_debug(name: str):
         raise HTTPException(status_code=502, detail="ESPN search failed")
     return data
 
+# ── Daily watchlist cron (snapshot diff → notifications) ──────────────────────
+
+def build_alert_snapshot(meta_json):
+    """Fetch ESPN data for a watched player and return a small alert-relevant
+    snapshot. Returns None if we can't reach ESPN or the meta is missing IDs."""
+    if not meta_json:
+        return None
+    try:
+        meta = json_lib.loads(meta_json)
+    except Exception:
+        return None
+    sport = meta.get("sport")
+    league = meta.get("league")
+    espn_id = meta.get("espnId")
+    if not sport or not league or not espn_id:
+        return None
+
+    espn_league = LEAGUE_OVERRIDES.get(league, league)
+    base = ("https://site.web.api.espn.com/apis/common/v3/sports/"
+            + sport + "/" + espn_league + "/athletes/" + str(espn_id))
+    root = fetch_url(base + "?region=us&lang=en")
+    if root is None or not isinstance(root, dict):
+        return None
+
+    # Mirror frontend buildSnapshot's "athlete.athlete" unwrap
+    inner = root.get("athlete") if isinstance(root.get("athlete"), dict) else root
+
+    # Status
+    status = root.get("status") or inner.get("status") or {}
+    status_type = status.get("type") if isinstance(status, dict) else {}
+    if not isinstance(status_type, dict):
+        status_type = {}
+    status_text = (status_type.get("description")
+                   or status_type.get("name")
+                   or (status.get("name") if isinstance(status, dict) else "")
+                   or "")
+
+    # Team
+    team = root.get("team") or inner.get("team") or {}
+    team_name = team.get("displayName") if isinstance(team, dict) else ""
+
+    # First injury (if any)
+    injuries = root.get("injuries") or inner.get("injuries") or []
+    inj0 = injuries[0] if injuries and isinstance(injuries[0], dict) else {}
+    injury_headline = (inj0.get("longComment") or inj0.get("shortComment")
+                       or inj0.get("description") or "")
+    injury_status = inj0.get("status") or ""
+    if not injury_status:
+        inj_type = inj0.get("type")
+        if isinstance(inj_type, dict):
+            injury_status = inj_type.get("description") or ""
+
+    return {
+        "status_text": (status_text or "").strip(),
+        "team_name": (team_name or "").strip(),
+        "injury_headline": (injury_headline or "").strip(),
+        "injury_status": (injury_status or "").strip(),
+    }
+
+
+def diff_snapshots(old, new):
+    """Compare two alert snapshots. Returns list of short alert message strings.
+    First-run (old is None) returns []  — we never alert on the first capture."""
+    if old is None or new is None:
+        return []
+    alerts = []
+
+    old_status = old.get("status_text", "")
+    new_status = new.get("status_text", "")
+    if old_status and new_status and old_status != new_status:
+        alerts.append("Status changed: " + old_status + " → " + new_status)
+
+    old_team = old.get("team_name", "")
+    new_team = new.get("team_name", "")
+    if old_team and new_team and old_team != new_team:
+        alerts.append("Trade: Now with " + new_team)
+
+    old_inj = old.get("injury_headline", "")
+    new_inj = new.get("injury_headline", "")
+    if new_inj and new_inj != old_inj:
+        msg = new_inj if len(new_inj) <= 140 else (new_inj[:137] + "...")
+        alerts.append("New injury report: " + msg)
+
+    return alerts
+
+
+def check_all_watched_players():
+    """Daily job: iterate active watchlist, fetch ESPN, diff, write notifications."""
+    print("[cron] Starting daily watchlist check at " + datetime.now().isoformat())
+    checked = 0
+    alerted = 0
+    skipped = 0
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""SELECT id, user_id, name, location FROM pw_watchlist
+                         WHERE status = 'active'
+                           AND location IS NOT NULL
+                           AND location != ''""")
+            rows = c.fetchall()
+
+        for row in rows:
+            watchlist_id, user_id, name, location = row
+            new_snap = build_alert_snapshot(location)
+            if new_snap is None:
+                skipped += 1
+                continue
+            checked += 1
+
+            # Read prior snapshot
+            with get_db() as conn:
+                c = conn.cursor()
+                c.execute("SELECT snapshot_json FROM pw_snapshots WHERE watchlist_id = %s",
+                          (watchlist_id,))
+                prior = c.fetchone()
+            old_snap = None
+            if prior and prior[0]:
+                try:
+                    old_snap = json_lib.loads(prior[0])
+                except Exception:
+                    old_snap = None
+
+            # Diff and write any alerts
+            alerts = diff_snapshots(old_snap, new_snap)
+            if alerts:
+                with get_db() as conn:
+                    c = conn.cursor()
+                    for msg in alerts:
+                        c.execute("""INSERT INTO pw_notifications
+                                     (user_id, watchlist_id, message)
+                                     VALUES (%s, %s, %s)""",
+                                  (user_id, watchlist_id, msg))
+                    conn.commit()
+                alerted += 1
+
+            # Always upsert the new snapshot
+            with get_db() as conn:
+                c = conn.cursor()
+                c.execute("""INSERT INTO pw_snapshots (watchlist_id, snapshot_json, captured_at)
+                             VALUES (%s, %s, CURRENT_TIMESTAMP)
+                             ON CONFLICT (watchlist_id) DO UPDATE
+                             SET snapshot_json = EXCLUDED.snapshot_json,
+                                 captured_at = CURRENT_TIMESTAMP""",
+                          (watchlist_id, json_lib.dumps(new_snap)))
+                conn.commit()
+
+        print("[cron] Done. Checked " + str(checked)
+              + " players, " + str(alerted) + " with new alerts, "
+              + str(skipped) + " skipped (no ESPN id or fetch failed)")
+    except Exception as e:
+        print("[cron] Fatal error: " + str(e))
+
+
+@app.post("/admin/run-cron")
+async def run_cron_manually(secret: str):
+    """Manually trigger the daily watchlist check. Useful for testing without
+    waiting for the 14:00 UTC schedule. Pass ?secret=... matching ADMIN_SECRET."""
+    if secret != os.environ.get("ADMIN_SECRET", "playerwatch-cron-2026"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    check_all_watched_players()
+    return {"status": "completed", "ran_at": datetime.now().isoformat()}
+
+
+# Module-level scheduler — kept in scope so it isn't garbage-collected
+_pw_scheduler = None
+
 # ── Startup ────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup_event():
     init_db()
     print("Player Watch DB initialized")
+
+    # Schedule daily watchlist check at 14:00 UTC
+    # = 4am HST / 9am EST winter / 10am EDT summer
+    global _pw_scheduler
+    _pw_scheduler = BackgroundScheduler(timezone="UTC")
+    _pw_scheduler.add_job(
+        check_all_watched_players,
+        CronTrigger(hour=14, minute=0),
+        id="pw_daily_check",
+        replace_existing=True,
+    )
+    _pw_scheduler.start()
+    print("Player Watch cron scheduled: daily at 14:00 UTC")
 
 if __name__ == "__main__":
     import uvicorn
