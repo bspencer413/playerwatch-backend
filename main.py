@@ -95,7 +95,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.0")
+app = FastAPI(title="Player Watch API", version="0.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -129,7 +129,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         return user_id
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.JWTError:
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.0", "app": "Player Watch"}
+            "version": "0.1.1", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
