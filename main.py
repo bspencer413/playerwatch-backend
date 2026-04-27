@@ -95,7 +95,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.1")
+app = FastAPI(title="Player Watch API", version="0.1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -126,7 +126,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         user_id = payload.get("sub")
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid authentication")
-        return user_id
+        return int(user_id)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
@@ -137,7 +137,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.1", "app": "Player Watch"}
+            "version": "0.1.2", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -152,7 +152,7 @@ async def register(user: UserCreate):
                   (user.email, hash_password(user.password)))
         user_id = c.fetchone()[0]
         conn.commit()
-        return {"access_token": create_access_token({"sub": user_id}), "token_type": "bearer"}
+        return {"access_token": create_access_token({"sub": str(user_id)}), "token_type": "bearer"}
 
 @app.post("/auth/login", response_model=Token)
 async def login(user: UserLogin):
@@ -162,7 +162,7 @@ async def login(user: UserLogin):
         result = c.fetchone()
         if not result or not verify_password(user.password, result[1]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        return {"access_token": create_access_token({"sub": result[0]}), "token_type": "bearer"}
+        return {"access_token": create_access_token({"sub": str(result[0])}), "token_type": "bearer"}
 
 @app.delete("/account")
 async def delete_account(user_id: int = Depends(get_current_user)):
