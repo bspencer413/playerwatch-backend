@@ -95,7 +95,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.3")
+app = FastAPI(title="Player Watch API", version="0.1.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +137,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.3", "app": "Player Watch"}
+            "version": "0.1.4", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -259,18 +259,16 @@ async def espn_search(name: str, limit: int = 10):
 
 @app.get("/espn/overview")
 async def espn_overview(sport: str, league: str, id: str):
-    """Proxy ESPN athlete data. Tries multiple endpoint variants — paths vary by sport.
-    /overview works for NFL/NBA; MLB tends to need /bio, /stats, or /gamelog instead."""
+    """Proxy ESPN athlete data via cdn.espn.com — the same source ESPN.com pages use.
+    Falls back to common/v3 paths if the CDN route misses."""
+    # Primary: cdn.espn.com player page with xhr=1 — returns full player JSON
+    cdn_url = "https://cdn.espn.com/core/" + league + "/player/_/id/" + id + "?xhr=1"
+    data = fetch_url(cdn_url)
+    if data is not None and isinstance(data, dict):
+        return data
+    # Fallbacks: legacy common/v3 paths
     base = "https://site.web.api.espn.com/apis/common/v3/sports/" + sport + "/" + league + "/athletes/" + id
-    urls = [
-        base + "/overview",
-        base + "/bio",
-        base + "/stats",
-        base + "/gamelog",
-        base,
-        "https://sports.core.api.espn.com/v2/sports/" + sport + "/leagues/" + league + "/athletes/" + id,
-    ]
-    for u in urls:
+    for u in [base + "/overview", base + "/bio", base + "/stats", base + "/gamelog", base]:
         data = fetch_url(u)
         if data is not None and isinstance(data, dict):
             return data
