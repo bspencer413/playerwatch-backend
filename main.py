@@ -95,7 +95,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.4")
+app = FastAPI(title="Player Watch API", version="0.1.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +137,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.4", "app": "Player Watch"}
+            "version": "0.1.5", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -239,7 +239,10 @@ async def delete_notification(notif_id: int, user_id: int = Depends(get_current_
 
 def fetch_url(url: str, timeout: int = 15):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "PlayerWatch/0.1"})
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+        })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json_lib.loads(resp.read().decode())
     except Exception as e:
@@ -259,13 +262,16 @@ async def espn_search(name: str, limit: int = 10):
 
 @app.get("/espn/overview")
 async def espn_overview(sport: str, league: str, id: str):
-    """Proxy ESPN athlete data via cdn.espn.com — the same source ESPN.com pages use.
-    Falls back to common/v3 paths if the CDN route misses."""
-    # Primary: cdn.espn.com player page with xhr=1 — returns full player JSON
-    cdn_url = "https://cdn.espn.com/core/" + league + "/player/_/id/" + id + "?xhr=1"
-    data = fetch_url(cdn_url)
-    if data is not None and isinstance(data, dict):
-        return data
+    """Proxy ESPN athlete data via cdn.espn.com — the same source ESPN.com pages use."""
+    cdn_urls = [
+        "https://cdn.espn.com/core/" + league + "/player?id=" + id + "&xhr=1",
+        "https://cdn.espn.com/core/" + league + "/player/_/id/" + id + "?xhr=1",
+        "https://www.espn.com/" + league + "/player/_/id/" + id + "?xhr=1",
+    ]
+    for u in cdn_urls:
+        data = fetch_url(u)
+        if data is not None and isinstance(data, dict):
+            return data
     # Fallbacks: legacy common/v3 paths
     base = "https://site.web.api.espn.com/apis/common/v3/sports/" + sport + "/" + league + "/athletes/" + id
     for u in [base + "/overview", base + "/bio", base + "/stats", base + "/gamelog", base]:
