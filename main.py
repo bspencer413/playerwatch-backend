@@ -95,7 +95,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.1.5")
+app = FastAPI(title="Player Watch API", version="0.1.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +137,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.5", "app": "Player Watch"}
+            "version": "0.1.6", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -260,25 +260,52 @@ async def espn_search(name: str, limit: int = 10):
         raise HTTPException(status_code=502, detail="ESPN search failed")
     return data
 
+# MLS uses ESPN's soccer/usa.1 path, not soccer/mls
+LEAGUE_OVERRIDES = {"mls": "usa.1"}
+
 @app.get("/espn/overview")
 async def espn_overview(sport: str, league: str, id: str):
-    """Proxy ESPN athlete data via cdn.espn.com — the same source ESPN.com pages use."""
-    cdn_urls = [
-        "https://cdn.espn.com/core/" + league + "/player?id=" + id + "&xhr=1",
-        "https://cdn.espn.com/core/" + league + "/player/_/id/" + id + "?xhr=1",
-        "https://www.espn.com/" + league + "/player/_/id/" + id + "?xhr=1",
-    ]
-    for u in cdn_urls:
-        data = fetch_url(u)
-        if data is not None and isinstance(data, dict):
-            return data
-    # Fallbacks: legacy common/v3 paths
-    base = "https://site.web.api.espn.com/apis/common/v3/sports/" + sport + "/" + league + "/athletes/" + id
-    for u in [base + "/overview", base + "/bio", base + "/stats", base + "/gamelog", base]:
-        data = fetch_url(u)
-        if data is not None and isinstance(data, dict):
-            return data
-    raise HTTPException(status_code=404, detail="No ESPN data found for this athlete")
+    """Proxy ESPN athlete data via site.web.api.espn.com/apis/common/v3.
+    Validates the ID against the base athlete endpoint, then fetches overview.
+    Always includes region=us&lang=en — ESPN treats these as required."""
+    espn_league = LEAGUE_OVERRIDES.get(league, league)
+    base = ("https://site.web.api.espn.com/apis/common/v3/sports/"
+            + sport + "/" + espn_league + "/athletes/" + id)
+    qs = "?region=us&lang=en"
+
+    # Validate ID exists
+    root = fetch_url(base + qs)
+    if root is None or not isinstance(root, dict):
+        raise HTTPException(status_code=404, detail="Athlete not found on ESPN")
+
+    # Fetch sections; merge what we get
+    result = {"athlete": root}
+    for section in ["overview", "bio", "stats", "gamelog"]:
+        sec = fetch_url(base + "/" + section + qs)
+        if sec is not None and isinstance(sec, dict):
+            result[section] = sec
+    return result
+
+@app.get("/espn/news")
+async def espn_news(sport: str, league: str, id: str):
+    """Proxy ESPN athlete news. Different host: site.api (no 'web')."""
+    espn_league = LEAGUE_OVERRIDES.get(league, league)
+    url = ("https://site.api.espn.com/apis/site/v2/sports/"
+           + sport + "/" + espn_league + "/athletes/" + id + "/news?region=us&lang=en")
+    data = fetch_url(url)
+    if data is None:
+        raise HTTPException(status_code=404, detail="No news found")
+    return data
+
+@app.get("/espn/debug")
+async def espn_debug(name: str):
+    """Returns raw ESPN search response so we can inspect field shapes."""
+    url = ("https://site.web.api.espn.com/apis/search/v2"
+           "?region=us&lang=en&query=" + urllib.parse.quote(name) + "&limit=10")
+    data = fetch_url(url)
+    if data is None:
+        raise HTTPException(status_code=502, detail="ESPN search failed")
+    return data
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 
