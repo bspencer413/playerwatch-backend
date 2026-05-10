@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.2.1")
+app = FastAPI(title="Player Watch API", version="0.2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.1", "app": "Player Watch"}
+            "version": "0.2.2", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -482,16 +482,15 @@ async def run_cron_manually(secret: str):
     return {"status": "completed", "ran_at": datetime.now().isoformat()}
 
 
-@app.get("/admin/stats")
-async def admin_stats(x_admin_token: str = Header(None, alias="X-Admin-Token")):
+@app.get("/admin/signup-stats")
+async def admin_signup_stats(x_admin_token: str = Header(None, alias="X-Admin-Token")):
     """Read-only signup metrics for the 3Brains scoreboard.
     Requires X-Admin-Token header matching ADMIN_STATS_TOKEN env var."""
     expected = os.environ.get("ADMIN_STATS_TOKEN")
     if not expected or x_admin_token != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
-    db = get_db()
-    try:
-        c = db.cursor()
+    with get_db() as conn:
+        c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM pw_users")
         total_users = c.fetchone()[0]
         c.execute("SELECT COUNT(*) FROM pw_users WHERE created_at >= NOW() - INTERVAL '24 hours'")
@@ -510,8 +509,6 @@ async def admin_stats(x_admin_token: str = Header(None, alias="X-Admin-Token")):
             "signups_30d": signups_30d,
             "latest_signup_at": latest
         }
-    finally:
-        db.close()
 
 
 # Module-level scheduler — kept in scope so it isn't garbage-collected
