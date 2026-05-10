@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Player Watch API", version="0.2.0")
+app = FastAPI(title="Player Watch API", version="0.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -480,6 +480,38 @@ async def run_cron_manually(secret: str):
         raise HTTPException(status_code=403, detail="Forbidden")
     check_all_watched_players()
     return {"status": "completed", "ran_at": datetime.now().isoformat()}
+
+
+@app.get("/admin/stats")
+async def admin_stats(x_admin_token: str = Header(None, alias="X-Admin-Token")):
+    """Read-only signup metrics for the 3Brains scoreboard.
+    Requires X-Admin-Token header matching ADMIN_STATS_TOKEN env var."""
+    expected = os.environ.get("ADMIN_STATS_TOKEN")
+    if not expected or x_admin_token != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    db = get_db()
+    try:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM pw_users")
+        total_users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM pw_users WHERE created_at >= NOW() - INTERVAL '24 hours'")
+        signups_24h = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM pw_users WHERE created_at >= NOW() - INTERVAL '7 days'")
+        signups_7d = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM pw_users WHERE created_at >= NOW() - INTERVAL '30 days'")
+        signups_30d = c.fetchone()[0]
+        c.execute("SELECT MAX(created_at) FROM pw_users")
+        latest_row = c.fetchone()
+        latest = latest_row[0].isoformat() if latest_row and latest_row[0] else None
+        return {
+            "total_users": total_users,
+            "signups_24h": signups_24h,
+            "signups_7d": signups_7d,
+            "signups_30d": signups_30d,
+            "latest_signup_at": latest
+        }
+    finally:
+        db.close()
 
 
 # Module-level scheduler — kept in scope so it isn't garbage-collected
