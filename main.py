@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.0", "app": "Player Watch"}
+            "version": "0.2.1", "app": "Player Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
