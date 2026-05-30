@@ -511,6 +511,45 @@ async def admin_signup_stats(x_admin_token: str = Header(None, alias="X-Admin-To
         }
 
 
+@app.get("/admin/platform-stats")
+async def admin_platform_stats():
+    """Aggregate signup metrics across ALL 3Brains apps on shared Postgres.
+    Auto-discovers *_users tables. Public read-only — counts only, no PII."""
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name LIKE %s
+            ORDER BY table_name
+        """, ('%\\_users',))
+        tables = [row[0] for row in c.fetchall()]
+        result = {}
+        for table in tables:
+            try:
+                c.execute("""
+                    SELECT
+                        COUNT(*),
+                        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours'),
+                        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days'),
+                        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days'),
+                        MAX(created_at)
+                    FROM {}
+                """.format(table))
+                row = c.fetchone()
+                result[table] = {
+                    "total_users": row[0],
+                    "signups_24h": row[1],
+                    "signups_7d": row[2],
+                    "signups_30d": row[3],
+                    "latest_signup_at": row[4].isoformat() if row[4] else None
+                }
+            except Exception as e:
+                conn.rollback()
+                result[table] = {"error": str(e)}
+        return result
+
+
 # Module-level scheduler — kept in scope so it isn't garbage-collected
 _pw_scheduler = None
 
